@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Car Model Viewer (Honda CR-V)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #cccccc; }
+        canvas { display: block; }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-family: sans-serif;
+            font-size: 1.5em;
+            color: #333;
+            background-color: rgba(255, 255, 255, 0.8);
+            padding: 15px;
+            border-radius: 5px;
+            display: none; /* Hidden by default, shown by JS */
+            text-align: center;
+        }
+        #placeholder-notice {
+             color: #888;
+             font-size: 0.8em;
+             margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">Loading Model...</div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { RGBELoader } from 'three/addons/loaders/RGBELoader.js'; // For HDRI environment maps
+
+        let scene, camera, renderer, controls, carModel;
+        const loadingElement = document.getElementById('loading');
+
+        // --- !! CRITICAL STEP !! ---
+        // 1. Obtain a detailed .glb 3D model file of the car.
+        // 2. Convert the .glb file to a Base64 string. (Search "glb to base64 converter")
+        // 3. Paste the *entire* Base64 string below, replacing the comment.
+        //    It MUST start with "data:model/gltf-binary;base64,"
+        const modelBase64 = `/* --- PASTE YOUR DETAILED CAR MODEL BASE64 DATA HERE --- */`;
+        // --- If this is empty or contains the comment, a basic placeholder will be shown ---
+
+
+        // Optional: Add an HDRI environment map for reflections (improves realism)
+        // 1. Find an HDR image (e.g., from polyhaven.com)
+        // 2. Convert it to Base64 (Search "hdr to base64 converter")
+        // 3. Paste the Base64 string here (will be very long)
+        const hdrBase64 = `/* Optional: PASTE YOUR BASE64 ENCODED HDR IMAGE DATA HERE */`; // Example: 'data:image/hdr;base64,...'
+
+
+        // Function to check if the Base64 placeholder is still present
+        function isPlaceholder(str) {
+            return !str || str.trim().startsWith('/*') || str.trim().length < 200; // Basic check
+        }
+
+        function createPlaceholderCar() {
+            const carGroup = new THREE.Group();
+
+            // Basic materials
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0x1A3C6B, roughness: 0.3, metalness: 0.7 });
+            const tireMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.8, metalness: 0.1 });
+            const glassMat = new THREE.MeshStandardMaterial({ color: 0x6699cc, roughness: 0.1, metalness: 0.2, transparent: true, opacity: 0.4 });
+
+            // Body
+            const bodyGeo = new THREE.BoxGeometry(2.5, 0.7, 1.2); // Main block
+            const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
+            bodyMesh.position.y = 0.45; // Lift body slightly
+            bodyMesh.castShadow = true;
+            carGroup.add(bodyMesh);
+
+            // Cabin
+            const cabinGeo = new THREE.BoxGeometry(1.3, 0.6, 1.0);
+            const cabinMesh = new THREE.Mesh(cabinGeo, glassMat); // Use glass-like material
+            cabinMesh.position.set(0, 1.05, 0); // Position on top of body
+            cabinMesh.castShadow = true;
+            carGroup.add(cabinMesh);
+
+            // Wheels (Cylinders)
+            const wheelRadius = 0.3;
+            const wheelThickness = 0.2;
+            const wheelGeo = new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelThickness, 24);
+            wheelGeo.rotateX(Math.PI / 2); // Orient wheels correctly
+
+            const wheelPositions = [
+                { x: 1.0, y: 0.3, z: 0.65 }, // Front Right
+                { x: 1.0, y: 0.3, z: -0.65 }, // Front Left
+                { x: -1.0, y: 0.3, z: 0.65 }, // Rear Right
+                { x: -1.0, y: 0.3, z: -0.65 }  // Rear Left
+            ];
+
+            wheelPositions.forEach(pos => {
+                const wheelMesh = new THREE.Mesh(wheelGeo, tireMat);
+                wheelMesh.position.set(pos.x, pos.y, pos.z);
+                wheelMesh.castShadow = true;
+                carGroup.add(wheelMesh);
+            });
+
+            // Adjust group position if needed, e.g., to center based on wheels
+            carGroup.position.y = 0; // Base wheels near ground
+
+            return carGroup;
+        }
+
+
+        function init() {
+            loadingElement.style.display = 'block'; // Show loading initially
+
+            // Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xaaaaaa); // Slightly lighter gray
+            scene.fog = new THREE.Fog(0xaaaaaa, 15, 60);
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(6, 4, 7); // Adjusted starting view
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.outputEncoding = THREE.sRGBEncoding;
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping; // Better color/light handling
+            renderer.toneMappingExposure = 1.0;
+            document.body.appendChild(renderer.domElement);
+
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 2;
+            controls.maxDistance = 30;
+            controls.target.set(0, 0.7, 0); // Aim slightly above ground
+            controls.update();
+
+            // Lighting
+            // HemisphereLight: Sky color, ground color, intensity
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
+            hemiLight.position.set(0, 20, 0);
+            scene.add(hemiLight);
+
+            // DirectionalLight: Simulates sun
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.0); // Increased intensity
+            dirLight.position.set(8, 15, 10);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 2048 * 2; // Higher res shadow map
+            dirLight.shadow.mapSize.height = 2048 * 2;
+            dirLight.shadow.camera.near = 0.5;
+            dirLight.shadow.camera.far = 50;
+            dirLight.shadow.camera.left = -15; // Wider shadow area
+            dirLight.shadow.camera.right = 15;
+            dirLight.shadow.camera.top = 15;
+            dirLight.shadow.camera.bottom = -15;
+            dirLight.shadow.bias = -0.001; // Helps reduce shadow artifacts
+            scene.add(dirLight);
+            // scene.add( new THREE.CameraHelper( dirLight.shadow.camera ) ); // Debug shadow camera
+
+
+            // Ground plane
+            const groundGeo = new THREE.PlaneGeometry(100, 100);
+            // Use MeshStandardMaterial for ground to react to light better
+            const groundMat = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.9, metalness: 0.1 });
+            const ground = new THREE.Mesh(groundGeo, groundMat);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+             // --- Environment Map Loading (Optional but Recommended for Realism) ---
+            if (!isPlaceholder(hdrBase64)) {
+                console.log("Loading Environment Map...");
+                new RGBELoader()
+                    .load(hdrBase64, function (texture) {
+                        texture.mapping = THREE.EquirectangularReflectionMapping;
+                        // scene.background = texture; // Optional: Set background to the HDRI
+                        scene.environment = texture; // Apply as environment map for reflections
+                        console.log("Environment Map Applied.");
+                        renderer.toneMappingExposure = 0.8; // Adjust exposure if HDRI is bright
+                    },
+                    (xhr) => console.log(`HDR Loading Progress: ${(xhr.loaded / xhr.total * 100).toFixed(0)}%`),
+                    (err) => console.error("Error loading HDR environment map:", err)
+                    );
+            } else {
+                console.log("No HDR environment map data provided.");
+                // Set a simple environment if no HDR is loaded (helps non-metallic materials)
+                 scene.environment = new THREE.PMREMGenerator(renderer).fromScene(scene).texture;
+            }
+
+
+            // --- Load the ACTUAL Model OR the Placeholder ---
+            if (isPlaceholder(modelBase64)) {
+                 console.warn("WARNING: No detailed model data found in 'modelBase64'. Displaying basic placeholder.");
+                 loadingElement.innerHTML = `
+                    Displaying Placeholder Car
+                    <div id="placeholder-notice">Paste your model's Base64 data into the HTML file to see the detailed car.</div>
+                 `;
+                 // Create and add the basic placeholder car shape
+                 const placeholderCar = createPlaceholderCar();
+                 scene.add(placeholderCar);
+                 carModel = placeholderCar; // Assign for potential later reference
+                 // Keep loading message visible briefly for notice
+                 setTimeout(() => { loadingElement.style.display = 'none'; }, 4000);
+
+            } else {
+                loadingElement.textContent = 'Loading Detailed Model...';
+                console.log("Attempting to load detailed model from Base64 data...");
+                const loader = new GLTFLoader();
+                loader.load(
+                    modelBase64, // Load from the provided Base64 string
+                    function (gltf) {
+                        // --- DETAILED MODEL LOADED ---
+                        carModel = gltf.scene;
+                        console.log("Detailed model loaded successfully!", carModel);
+
+                        // Basic Centering & Scaling (You might need to fine-tune this based on the model)
+                        const box = new THREE.Box3().setFromObject(carModel);
+                        const size = box.getSize(new THREE.Vector3());
+                        const center = box.getCenter(new THREE.Vector3());
+
+                        // Scale based on desired size (e.g., ~3-4 units wide)
+                        const desiredWidth = 3.5;
+                        const scale = desiredWidth / size.x;
+                        // carModel.scale.set(scale, scale, scale); // Apply scaling UNIFORMLY
+
+                        // Recalculate bounds after scaling
+                        // box.setFromObject(carModel);
+                        // box.getCenter(center);
+
+                        // Position the model
+                        // carModel.position.x -= center.x; // Center horizontally
+                        // carModel.position.z -= center.z; // Center depth-wise
+                        // carModel.position.y = -box.min.y; // Place bottom of the model roughly at y=0
+                        carModel.position.y = 0; // Adjust manually if needed
+
+                        // Enable Shadows & Fine-tune Materials (CRITICAL for detail)
+                        carModel.traverse((node) => {
+                            if (node.isMesh) {
+                                node.castShadow = true;
+                                node.receiveShadow = true; // More subtle, but adds realism
+
+                                // --- !! IMPORTANT MATERIAL ADJUSTMENT !! ---
+                                // You WILL need to inspect your specific model's material names
+                                // (e.g., by logging `node.material.name` or using browser dev tools)
+                                // and adjust properties like color, metalness, roughness accordingly.
+                                // The code from the *previous* response had examples for paint, glass, tires etc.
+                                // Re-apply similar logic here based on your *actual* model's structure.
+                                // Example:
+                                // if (node.material && node.material.name.toLowerCase().includes('paint')) {
+                                //     node.material.metalness = 0.9;
+                                //     node.material.roughness = 0.15;
+                                //     node.material.color.set(0x1A3C6B); // CRV Blue
+                                // }
+                                // if (node.material && node.material.name.toLowerCase().includes('glass')) {
+                                //      node.material.transparent = true;
+                                //      node.material.opacity = 0.2;
+                                //      node.material.roughness = 0.05;
+                                // }
+                            }
+                        });
+
+                        scene.add(carModel);
+                        loadingElement.style.display = 'none'; // Hide loading message
+                        console.log("Detailed car added to scene.");
+                    },
+                    // Progress
+                    function (xhr) {
+                        if (xhr.lengthComputable) {
+                           const percentLoaded = (xhr.loaded / xhr.total * 100).toFixed(0);
+                           loadingElement.textContent = `Loading Detailed Model: ${percentLoaded}%`;
+                           console.log(`Model Loading: ${percentLoaded}%`);
+                        } else {
+                           loadingElement.textContent = `Loading Detailed Model... (Size unknown)`;
+                           console.log(`Model Loading: ${(xhr.loaded / 1024 / 1024).toFixed(2)} MB loaded`);
+                        }
+                    },
+                    // Error
+                    function (error) {
+                        console.error('An error happened during detailed model loading:', error);
+                        loadingElement.innerHTML = `
+                            Error Loading Detailed Model!
+                             <div id="placeholder-notice">Check Base64 data & browser console. Displaying placeholder.</div>
+                             `;
+                         loadingElement.style.color = 'red';
+                         const placeholderCar = createPlaceholderCar(); // Show placeholder on error
+                         scene.add(placeholderCar);
+                         carModel = placeholderCar;
+                         setTimeout(() => { loadingElement.style.display = 'none'; }, 5000);
+                    }
+                );
+            }
+
+
+            // Handle Window Resize
+            window.addEventListener('resize', onWindowResize, false);
+
+            // Start Animation Loop
+            animate();
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update(); // Required for damping
+            renderer.render(scene, camera);
+        }
+
+        // --- Start the application ---
+        init();
+
+    </script>
+</body>
+</html>
